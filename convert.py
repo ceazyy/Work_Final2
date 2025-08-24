@@ -21,7 +21,21 @@ class DocumentProcessor:
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from YAML file."""
         with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            config = yaml.safe_load(f)
+        
+        # Validate Azure OpenAI configuration
+        required_keys = ['api_key', 'api_version', 'endpoint', 'deployment_name']
+        if 'azure_openai' not in config:
+            raise ValueError("azure_openai section missing from config.yaml")
+        
+        for key in required_keys:
+            if key not in config['azure_openai']:
+                raise ValueError(f"Missing required key '{key}' in azure_openai config")
+            
+            if config['azure_openai'][key].startswith('YOUR_'):
+                print(f"⚠️  Warning: Please update {key} in config.yaml with your actual Azure OpenAI {key}")
+        
+        return config
     
     def parse_input_folder(self, input_folder: str = 'input') -> Dict[str, Any]:
         """Parse all files in the input folder and extract information."""
@@ -55,21 +69,61 @@ class DocumentProcessor:
         paragraphs = []
         placeholders = set()
         
+        # Define instruction words and phrases that indicate placeholders
+        instruction_words = [
+            'describe', 'list', 'insert', 'define', 'provide', 'explain', 
+            'identify', 'specify', 'detail', 'include', 'add', 'enter',
+            'fill', 'complete', 'outline', 'summarize', 'document', 'state'
+        ]
+        
+        placeholder_phrases = [
+            'purpose and scope', 'architecture specifications', 'block diagram',
+            'limitations', 'technical terms', 'abbreviations', 'external interfaces',
+            'design decisions', 'assumptions', 'standards', 'protocols',
+            'clocking', 'reset', 'power domains'
+        ]
+        
         for para in doc.paragraphs:
             text = para.text
             paragraphs.append(text)
-            # Find placeholders in various formats: {{text}}, [text], <text>, underscores, etc.
+            
+            # Find placeholders in various formats: {{text}}, [text], <text>, etc.
             found_placeholders = re.findall(r'\{\{([^}]+)\}\}|\[([^\]]+)\]|<([^>]+)>|\$\{([^}]+)\}', text)
-            # Also find underscored placeholders like "Title: ____________________"
+            
+            # Find underscored placeholders like "Title: ____________________"
             underscore_matches = re.findall(r'([^:]*?):\s*_{10,}', text)
             for match in underscore_matches:
                 if match.strip():
                     placeholders.add(match.strip())
+            
+            # Process other placeholder formats
             for groups in found_placeholders:
-                # Extract non-empty groups
                 for group in groups:
                     if group:
                         placeholders.add(group.strip())
+            
+            # NEW: Detect instruction-style placeholders
+            if text and len(text.strip()) > 10:  # Only process substantial text
+                text_lower = text.lower()
+                
+                # Check if it's an instruction sentence (ends with period, starts with action word)
+                is_instruction = (
+                    text.strip().endswith('.') and
+                    any(text_lower.startswith(word) for word in instruction_words)
+                )
+                
+                # Check if it contains common placeholder phrases
+                has_placeholder_phrase = any(phrase in text_lower for phrase in placeholder_phrases)
+                
+                # Check if it's likely a template instruction
+                is_template_instruction = (
+                    ('design' in text_lower or 'rtl' in text_lower) and
+                    len(text.split()) < 20  # Not too long
+                )
+                
+                if is_instruction or has_placeholder_phrase or is_template_instruction:
+                    # Use the full text as the placeholder key
+                    placeholders.add(text.strip())
         
         # Extract tables
         tables = []
@@ -80,17 +134,40 @@ class DocumentProcessor:
                 for cell in row.cells:
                     cell_text = cell.text
                     row_data.append(cell_text)
-                    # Also check for placeholders in table cells
+                    
+                    # Check for placeholders in table cells
                     found_placeholders = re.findall(r'\{\{([^}]+)\}\}|\[([^\]]+)\]|<([^>]+)>|\$\{([^}]+)\}', cell_text)
+                    
                     # Check for underscored placeholders in tables
                     underscore_matches = re.findall(r'([^:]*?):\s*_{10,}', cell_text)
                     for match in underscore_matches:
                         if match.strip():
                             placeholders.add(match.strip())
+                    
                     for groups in found_placeholders:
                         for group in groups:
                             if group:
                                 placeholders.add(group.strip())
+                    
+                    # NEW: Also check for instruction-style placeholders in table cells
+                    if cell_text and len(cell_text.strip()) > 10:
+                        text_lower = cell_text.lower()
+                        
+                        is_instruction = (
+                            cell_text.strip().endswith('.') and
+                            any(text_lower.startswith(word) for word in instruction_words)
+                        )
+                        
+                        has_placeholder_phrase = any(phrase in text_lower for phrase in placeholder_phrases)
+                        
+                        is_template_instruction = (
+                            ('design' in text_lower or 'rtl' in text_lower) and
+                            len(cell_text.split()) < 20
+                        )
+                        
+                        if is_instruction or has_placeholder_phrase or is_template_instruction:
+                            placeholders.add(cell_text.strip())
+                
                 table_data.append(row_data)
             tables.append(table_data)
         
@@ -201,30 +278,50 @@ Keep the response concise and directly relevant to the placeholder name.
         for para in doc.paragraphs:
             original_text = para.text
             if original_text:
-                # Check for underscored placeholders and replace them
+                replaced = False
+                
+                # First, check for exact full-text matches (instruction-style placeholders)
                 for placeholder, filled_content in filled_placeholders.items():
-                    # Look for patterns like "Title: ____________________"
-                    pattern = f"{re.escape(placeholder)}:\\s*_{{10,}}"
-                    
-                    if re.search(pattern, original_text):
-                        # Clear the paragraph and add new content
+                    if original_text.strip() == placeholder:
+                        # Replace entire paragraph with filled content
                         para.clear()
-                        para.add_run(f"{placeholder}: {filled_content}")
+                        para.add_run(filled_content)
                         replacements_made += 1
+                        replaced = True
                         break
                 
-                # Also handle other placeholder formats if any exist
-                for placeholder, filled_content in filled_placeholders.items():
-                    placeholder_patterns = [
-                        f"{{{{ {placeholder} }}}}",
-                        f"[{placeholder}]",
-                        f"<{placeholder}>",
-                        f"${{{placeholder}}}"
-                    ]
-                    
-                    for pattern in placeholder_patterns:
-                        if pattern in para.text:
-                            para.text = para.text.replace(pattern, filled_content)
+                if not replaced:
+                    # Check for underscored placeholders like "Title: ____________________"
+                    for placeholder, filled_content in filled_placeholders.items():
+                        pattern = f"{re.escape(placeholder)}:\\s*_{{10,}}"
+                        
+                        if re.search(pattern, original_text):
+                            # Clear the paragraph and add new content
+                            para.clear()
+                            para.add_run(f"{placeholder}: {filled_content}")
+                            replacements_made += 1
+                            replaced = True
+                            break
+                
+                if not replaced:
+                    # Handle other placeholder formats
+                    for placeholder, filled_content in filled_placeholders.items():
+                        placeholder_patterns = [
+                            f"{{{{ {placeholder} }}}}",
+                            f"[{placeholder}]",
+                            f"<{placeholder}>",
+                            f"${{{placeholder}}}"
+                        ]
+                        
+                        for pattern in placeholder_patterns:
+                            if pattern in para.text:
+                                para.text = para.text.replace(pattern, filled_content)
+                                replacements_made += 1
+                                replaced = True
+                                break
+                        
+                        if replaced:
+                            break
         
         # Replace placeholders in tables
         for table in doc.tables:
@@ -232,28 +329,46 @@ Keep the response concise and directly relevant to the placeholder name.
                 for cell in row.cells:
                     original_text = cell.text
                     if original_text:
-                        # Check for underscored placeholders and replace them
+                        replaced = False
+                        
+                        # First, check for exact full-text matches (instruction-style placeholders)
                         for placeholder, filled_content in filled_placeholders.items():
-                            pattern = f"{re.escape(placeholder)}:\\s*_{{10,}}"
-                            if re.search(pattern, original_text):
-                                # Clear the cell and add new content
-                                cell.text = f"{placeholder}: {filled_content}"
+                            if original_text.strip() == placeholder:
+                                # Replace entire cell content
+                                cell.text = filled_content
                                 replacements_made += 1
+                                replaced = True
                                 break
                         
-                        # Handle other placeholder formats
-                        for placeholder, filled_content in filled_placeholders.items():
-                            placeholder_patterns = [
-                                f"{{{{ {placeholder} }}}}",
-                                f"[{placeholder}]",
-                                f"<{placeholder}>",
-                                f"${{{placeholder}}}"
-                            ]
-                            
-                            for pattern in placeholder_patterns:
-                                if pattern in cell.text:
-                                    cell.text = cell.text.replace(pattern, filled_content)
+                        if not replaced:
+                            # Check for underscored placeholders
+                            for placeholder, filled_content in filled_placeholders.items():
+                                pattern = f"{re.escape(placeholder)}:\\s*_{{10,}}"
+                                if re.search(pattern, original_text):
+                                    cell.text = f"{placeholder}: {filled_content}"
                                     replacements_made += 1
+                                    replaced = True
+                                    break
+                        
+                        if not replaced:
+                            # Handle other placeholder formats
+                            for placeholder, filled_content in filled_placeholders.items():
+                                placeholder_patterns = [
+                                    f"{{{{ {placeholder} }}}}",
+                                    f"[{placeholder}]",
+                                    f"<{placeholder}>",
+                                    f"${{{placeholder}}}"
+                                ]
+                                
+                                for pattern in placeholder_patterns:
+                                    if pattern in cell.text:
+                                        cell.text = cell.text.replace(pattern, filled_content)
+                                        replacements_made += 1
+                                        replaced = True
+                                        break
+                                
+                                if replaced:
+                                    break
         
         print(f"Total replacements made: {replacements_made}")
         
@@ -271,6 +386,35 @@ Keep the response concise and directly relevant to the placeholder name.
             'placeholders_replaced': len(filled_placeholders),
             'status': 'success'
         }
+
+def test_azure_openai_config():
+    """Test Azure OpenAI configuration without making API calls."""
+    try:
+        processor = DocumentProcessor()
+        config = processor.config['azure_openai']
+        
+        print("=== Azure OpenAI Configuration ===")
+        print(f"API Version: {config['api_version']}")
+        print(f"Endpoint: {config['endpoint']}")
+        print(f"Deployment Name: {config['deployment_name']}")
+        print(f"API Key: {'*' * (len(config['api_key']) - 8) + config['api_key'][-4:] if not config['api_key'].startswith('YOUR_') else 'Not configured'}")
+        
+        # Check if all values are properly set
+        all_configured = all(
+            not value.startswith('YOUR_') 
+            for value in config.values()
+        )
+        
+        if all_configured:
+            print("✅ Configuration appears to be properly set!")
+        else:
+            print("⚠️  Some configuration values need to be updated")
+            
+        return all_configured
+        
+    except Exception as e:
+        print(f"❌ Configuration error: {e}")
+        return False
 
 def generate_document_from_json(json_path: str = 'output_generated/processed_document.json',
                                template_path: str = 'templates/template.docx',
