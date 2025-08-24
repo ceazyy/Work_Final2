@@ -1,0 +1,5 @@
+azure_openai:
+  api_key: "your-azure-openai-api-key-here"
+  endpoint: "https://your-resource-name.openai.azure.com/"
+  api_version: "2024-02-15-preview"
+  deployment_name: "gpt-4o-mini"

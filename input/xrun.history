@@ -1,0 +1,10 @@
+# ModelSim Command History
+vlib work
+vlog counter.v
+vsim work.counter
+add wave sim:/counter/*
+force clk 0 0, 1 5 -repeat 10
+force rstn 0
+run 20
+force rstn 1
+run 100

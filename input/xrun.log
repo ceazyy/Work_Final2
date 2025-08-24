@@ -1,0 +1,23 @@
+# ModelSim Log File
+# Compile and Simulate counter.v
+# Date: Sun Aug 24 21:12:36 2025
+
+vlib work
+vlog counter.v
+# ** Warning: (vlog-2163) counter.v(9): Variable 'out' is initialized in an always block.
+# ** Note: (vlog-2286) No timescale directive in file: counter.v
+#          Default time unit = 1ns, precision = 1ps
+
+vsim work.counter
+# ** Note: (vsim-3812) Design is being simulated with default timescale = 1 ns / 1 ps.
+# Loading work.counter
+# ** Warning: (vsim-3009) [TFMPC] - Port connection warnings may exist.
+# Simulation started
+
+add wave sim:/counter/*
+force clk 0 0, 1 5 -repeat 10
+force rstn 0
+run 20
+force rstn 1
+run 100
+# Simulation finished
